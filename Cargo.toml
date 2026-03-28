@@ -1,0 +1,15 @@
+[package]
+name = "txget"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.0", features = ["derive"] }
+html-escape = "0.2.13"
+regex = "1.12.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+walkdir = "2.5.0"
+zip = "8.4.0"
