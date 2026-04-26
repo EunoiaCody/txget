@@ -1,7 +1,6 @@
 use clap::CommandFactory;
 use clap_complete::{generate_to, shells::Fish};
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 
 include!("src/lib.rs");
