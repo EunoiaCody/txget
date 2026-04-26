@@ -8,30 +8,9 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+use sevenz_rust::decompress_file;
 
-#[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    about = "Extract questions and answers from questionData.js files"
-)]
-struct Args {
-    /// Input root directory or a .zip file
-    #[arg(short, long, default_value = ".")]
-    file: String,
-
-    /// Output Markdown file path
-    #[arg(short, long, default_value = "qa_output.md")]
-    output: String,
-
-    /// Include analysis field when available
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    include_analysis: bool,
-
-    /// Include source file path for each question
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    include_source: bool,
-}
+use txget::Args;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Entry {
@@ -336,6 +315,17 @@ fn main() -> Result<()> {
                 entries.append(&mut process_file(entry.path())?);
             }
         }
+    } else if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "7z") {
+        output_dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let dir = tempdir()?;
+        decompress_file(input_path, dir.path())?;
+
+        for entry in WalkDir::new(dir.path()) {
+            let entry = entry?;
+            if entry.file_name() == "questionData.js" {
+                entries.append(&mut process_file(entry.path())?);
+            }
+        }
     } else if input_path.is_dir() {
         output_dir = input_path.to_path_buf();
         for entry in WalkDir::new(input_path) {
@@ -351,7 +341,7 @@ fn main() -> Result<()> {
     {
         entries.append(&mut process_file(input_path)?);
     } else {
-        anyhow::bail!("Input path is not a directory, a .zip file, or a questionData.js file");
+        anyhow::bail!("Input path is not a directory, a .zip/.7z file, or a questionData.js file");
     }
 
     let mut read_aloud = Vec::new();
