@@ -40,8 +40,8 @@ cargo install --path .
 
 - `-f, --file <FILE>`: 输入路径（目录、.zip 或 questionData.js），默认 `.`（当前目录）。
 - `-o, --output <OUTPUT>`: 输出 Markdown 文件名，默认 `qa_output.md`。
-- `--include-analysis`: 是否在输出中包含解析/线索（默认 `true`）。
-- `--include-source`: 是否在输出中包含来源文件路径（默认 `true`）。
+- `--include-analysis`: 是否在输出中包含解析/线索（默认 `false`）。
+- `--include-source`: 是否在输出中包含来源文件路径（默认 `false`）。
 
 输出说明
 输出为 Markdown 文件，包含分节统计（朗读、翻译、问答、Retelling 等）和每题的题目、参考答案、可选解析与来源路径，便于人工校对与后续编辑。

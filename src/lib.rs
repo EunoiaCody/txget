@@ -17,10 +17,10 @@ pub struct Args {
     pub output: String,
 
     /// Include analysis field when available
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub include_analysis: bool,
 
     /// Include source file path for each question
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub include_source: bool,
 }
