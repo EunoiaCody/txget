@@ -211,6 +211,63 @@ fn looks_like_retelling(e: &Entry) -> bool {
     has_retell_hint && max_ans_len >= 120
 }
 
+fn fix_retelling_swap(e: &Entry) -> (String, Vec<String>) {
+    if !looks_like_retelling(e) {
+        return (e.question_text.clone(), e.answers.clone());
+    }
+
+    let all_candidates: Vec<&String> = e.answers.iter().chain(std::iter::once(&e.question_text)).collect();
+
+    let mut shortest: Option<&String> = None;
+    let mut second_longest: Option<&String> = None;
+    let mut longest: Option<&String> = None;
+    let mut longest_len = 0;
+    let mut second_len = 0;
+    let mut shortest_len = usize::MAX;
+
+    for c in &all_candidates {
+        let len = c.len();
+        if len > longest_len {
+            second_len = longest_len;
+            second_longest = longest.clone();
+            longest_len = len;
+            longest = Some(*c);
+        } else if len > second_len {
+            second_len = len;
+            second_longest = Some(*c);
+        }
+        if len < shortest_len {
+            shortest_len = len;
+            shortest = Some(*c);
+        }
+    }
+
+    let longest = longest.as_ref();
+    let shortest = shortest.as_ref();
+
+    let use_longest_as_question = longest.map_or(false, |l| {
+        shortest.map_or(false, |s| {
+            l.len() >= s.len() * 3 && l.len() >= s.len() + 200 && e.question_text.len() < s.len()
+        })
+    });
+
+    if use_longest_as_question {
+        let new_question = (*longest.unwrap()).clone();
+        let new_answer = (*shortest.unwrap()).clone();
+        let mut new_answers = e.answers.clone();
+        new_answers.retain(|a| a != &new_question && a != &new_answer);
+        new_answers.insert(0, new_answer);
+        if let Some(second) = second_longest {
+            if new_answers.len() < 2 && !new_answers.contains(second) {
+                new_answers.push((*second).clone());
+            }
+        }
+        (new_question, new_answers)
+    } else {
+        (e.question_text.clone(), e.answers.clone())
+    }
+}
+
 fn extract_qa_order_index(question_text: &str) -> i32 {
     let text = question_text.to_lowercase();
     let en_map = [
@@ -263,7 +320,7 @@ fn contains_chinese(s: &str) -> bool {
     s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
-fn render_entry(e: &Entry, include_analysis: bool, include_source: bool) -> String {
+fn render_entry_with_text(question_text: &str, answers: &[String], e: &Entry, include_analysis: bool, include_source: bool) -> String {
     let mut out = format!("### {}\n", e.question_id);
     if include_source {
         out.push_str(&format!("- 来源：`{}`\n", e.source_file));
@@ -274,16 +331,16 @@ fn render_entry(e: &Entry, include_analysis: bool, include_source: bool) -> Stri
         e.qtype_id.as_ref().unwrap_or(&serde_json::Value::Null)
     ));
     out.push_str("#### 题目\n");
-    out.push_str(if e.question_text.is_empty() {
+    out.push_str(if question_text.is_empty() {
         "_（空）_"
     } else {
-        &e.question_text
+        question_text
     });
     out.push_str("\n\n#### 参考答案\n");
-    if e.answers.is_empty() {
+    if answers.is_empty() {
         out.push_str("_未提取到可见答案_\n");
     } else {
-        for (i, a) in e.answers.iter().enumerate() {
+        for (i, a) in answers.iter().enumerate() {
             out.push_str(&format!("{}. {}\n", i + 1, a));
         }
     }
@@ -294,6 +351,10 @@ fn render_entry(e: &Entry, include_analysis: bool, include_source: bool) -> Stri
     }
     out.push_str("\n");
     out
+}
+
+fn render_entry(e: &Entry, include_analysis: bool, include_source: bool) -> String {
+    render_entry_with_text(&e.question_text, &e.answers, e, include_analysis, include_source)
 }
 
 fn main() -> Result<()> {
@@ -366,6 +427,12 @@ fn main() -> Result<()> {
         } else {
             others.push(e);
         }
+    }
+
+    for e in retelling.iter_mut() {
+        let (qt, ans) = fix_retelling_swap(e);
+        e.question_text = qt;
+        e.answers = ans;
     }
 
     qa.sort_by_key(|e| {
