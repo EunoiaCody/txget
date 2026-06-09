@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::Parser as ClapParser;
+use genpdf::elements;
+use genpdf::fonts::{FontData, FontFamily};
 use html_escape::decode_html_entities;
+use pulldown_cmark::{Event, HeadingLevel, Parser as MarkdownParser, Tag, TagEnd};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -320,6 +324,42 @@ fn contains_chinese(s: &str) -> bool {
     s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
+fn extract_group_name(path: &Path) -> String {
+    // Walk up from questionData.js to find the "questions" directory,
+    // then group by the parent of "questions" (the set/book/exam identifier):
+    //   .../<set_uuid>/questions/<question_uuid>/questionData.js
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().and_then(|s| s.to_str()) == Some("questions") {
+            if let Some(set_dir) = dir.parent() {
+                if let Some(name) = set_dir.file_name().and_then(|s| s.to_str()) {
+                    return name.to_string();
+                }
+            }
+            break;
+        }
+        current = dir.parent();
+    }
+    // Fallback: use immediate parent directory name
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+}
+
 fn render_entry_with_text(question_text: &str, answers: &[String], e: &Entry, include_analysis: bool, include_source: bool) -> String {
     let mut out = format!("### {}\n", e.question_id);
     if include_source {
@@ -357,52 +397,15 @@ fn render_entry(e: &Entry, include_analysis: bool, include_source: bool) -> Stri
     render_entry_with_text(&e.question_text, &e.answers, e, include_analysis, include_source)
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let input_path = Path::new(&args.file);
-    let mut entries = Vec::new();
-    let mut output_dir = PathBuf::from(".");
-
-    if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "zip") {
-        output_dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let dir = tempdir()?;
-        let file = fs::File::open(input_path)?;
-        let mut archive = ZipArchive::new(file)?;
-        archive.extract(dir.path())?;
-
-        for entry in WalkDir::new(dir.path()) {
-            let entry = entry?;
-            if entry.file_name() == "questionData.js" {
-                entries.append(&mut process_file(entry.path())?);
-            }
-        }
-    } else if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "7z") {
-        output_dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let dir = tempdir()?;
-        decompress_file(input_path, dir.path())?;
-
-        for entry in WalkDir::new(dir.path()) {
-            let entry = entry?;
-            if entry.file_name() == "questionData.js" {
-                entries.append(&mut process_file(entry.path())?);
-            }
-        }
-    } else if input_path.is_dir() {
-        output_dir = input_path.to_path_buf();
-        for entry in WalkDir::new(input_path) {
-            let entry = entry?;
-            if entry.file_name() == "questionData.js" {
-                entries.append(&mut process_file(entry.path())?);
-            }
-        }
-    } else if input_path.is_file()
-        && input_path
-            .file_name()
-            .map_or(false, |n| n == "questionData.js")
-    {
-        entries.append(&mut process_file(input_path)?);
-    } else {
-        anyhow::bail!("Input path is not a directory, a .zip/.7z file, or a questionData.js file");
+fn process_and_write_group(
+    group_name: &str,
+    entries: Vec<Entry>,
+    out_path: &Path,
+    include_analysis: bool,
+    include_source: bool,
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
     }
 
     let mut read_aloud = Vec::new();
@@ -411,21 +414,21 @@ fn main() -> Result<()> {
     let mut retelling = Vec::new();
     let mut others = Vec::new();
 
-    for e in entries.clone() {
-        if looks_like_read_aloud(&e) {
-            read_aloud.push(e);
-        } else if looks_like_retelling(&e) {
-            retelling.push(e);
-        } else if looks_like_qa(&e) {
-            qa.push(e);
+    for e in &entries {
+        if looks_like_read_aloud(e) {
+            read_aloud.push(e.clone());
+        } else if looks_like_retelling(e) {
+            retelling.push(e.clone());
+        } else if looks_like_qa(e) {
+            qa.push(e.clone());
         } else if contains_chinese(&e.question_text)
             && e.answers
                 .iter()
                 .any(|a| a.chars().any(|c| c.is_ascii_alphabetic()))
         {
-            translation.push(e);
+            translation.push(e.clone());
         } else {
-            others.push(e);
+            others.push(e.clone());
         }
     }
 
@@ -447,7 +450,7 @@ fn main() -> Result<()> {
     retelling.sort_by(sort_by_id);
     others.sort_by(sort_by_id);
 
-    let mut markdown = format!("# 题目与答案提取结果\n\n");
+    let mut markdown = format!("# 题目与答案提取结果 — {}\n\n", group_name);
     markdown.push_str(&format!("- 题目总数：{}\n", entries.len()));
     markdown.push_str(&format!("- 第一部分（跟随朗读）：{}\n", read_aloud.len()));
     markdown.push_str(&format!("- 第二部分（翻译题）：{}\n", translation.len()));
@@ -459,40 +462,276 @@ fn main() -> Result<()> {
     markdown.push_str("\n");
 
     let sections = [
-        ("## 第一部分：跟随文章朗读", read_aloud),
-        ("## 第二部分：翻译题（中文题目 -> 英文答案）", translation),
-        ("## 第三部分：问答题（按第几个问题顺序）", qa),
-        ("## 第四部分：Retelling", retelling),
+        ("## 第一部分：跟随文章朗读", &read_aloud),
+        ("## 第二部分：翻译题（中文题目 -> 英文答案）", &translation),
+        ("## 第三部分：问答题（按第几个问题顺序）", &qa),
+        ("## 第四部分：Retelling", &retelling),
     ];
 
     for (title, sec_entries) in sections {
         markdown.push_str(title);
         markdown.push_str("\n\n");
         for e in sec_entries {
-            markdown.push_str(&render_entry(
-                &e,
-                args.include_analysis,
-                args.include_source,
-            ));
+            markdown.push_str(&render_entry(e, include_analysis, include_source));
         }
     }
 
     if !others.is_empty() {
         markdown.push_str("## 其他未归类\n\n");
-        for e in others {
-            markdown.push_str(&render_entry(
-                &e,
-                args.include_analysis,
-                args.include_source,
-            ));
+        for e in &others {
+            markdown.push_str(&render_entry(e, include_analysis, include_source));
         }
     }
 
-    let out_path = output_dir.join(&args.output);
-    fs::write(&out_path, markdown)?;
+    fs::write(out_path, markdown)?;
+    Ok(())
+}
 
-    println!("Done. Extracted {} questions.", entries.len());
-    println!("Output: {}", out_path.display());
+fn convert_md_to_pdf(md_path: &Path) -> Result<()> {
+    let md_content = fs::read_to_string(md_path)?;
+
+    let regular_path = Path::new("/usr/share/fonts/TTF/LXGWWenKai-Regular.ttf");
+    let bold_path = Path::new("/usr/share/fonts/TTF/LXGWWenKai-Medium.ttf");
+    if !regular_path.exists() {
+        anyhow::bail!(
+            "CJK font not found at {}. Install with: sudo pacman -S noto-fonts-cjk",
+            regular_path.display()
+        );
+    }
+
+    let family = FontFamily {
+        regular: FontData::load(regular_path, None)?,
+        bold: FontData::load(
+            if bold_path.exists() {
+                bold_path
+            } else {
+                regular_path
+            },
+            None,
+        )?,
+        italic: FontData::load(regular_path, None)?,
+        bold_italic: FontData::load(
+            if bold_path.exists() {
+                bold_path
+            } else {
+                regular_path
+            },
+            None,
+        )?,
+    };
+
+    let mut doc = genpdf::Document::new(family);
+    doc.set_minimal_conformance();
+    doc.set_font_size(11);
+
+    let parser = MarkdownParser::new(&md_content);
+    let mut text_buffer = String::new();
+    let mut list_strings: Vec<String> = Vec::new();
+    let mut ordered_list = false;
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Heading { level, .. } => {
+                    if !text_buffer.trim().is_empty() {
+                        doc.push(elements::Paragraph::new(
+                            std::mem::take(&mut text_buffer).trim().to_string(),
+                        ));
+                    }
+                    let size = match level {
+                        HeadingLevel::H1 => 18,
+                        HeadingLevel::H2 => 15,
+                        HeadingLevel::H3 => 13,
+                        HeadingLevel::H4 => 11,
+                        _ => 11,
+                    };
+                    doc.set_font_size(size);
+                }
+                Tag::List(start) => {
+                    ordered_list = start.is_some();
+                    list_strings = Vec::new();
+                }
+                Tag::Item => {
+                    text_buffer.clear();
+                }
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Heading(_) => {
+                    if !text_buffer.trim().is_empty() {
+                        doc.push(elements::Paragraph::new(
+                            std::mem::take(&mut text_buffer).trim().to_string(),
+                        ));
+                    }
+                    doc.set_font_size(11);
+                    doc.push(elements::Break::new(1));
+                }
+                TagEnd::Paragraph => {
+                    if !text_buffer.trim().is_empty() {
+                        doc.push(elements::Paragraph::new(
+                            std::mem::take(&mut text_buffer).trim().to_string(),
+                        ));
+                    }
+                }
+                TagEnd::Item => {
+                    let text = std::mem::take(&mut text_buffer);
+                    if !text.trim().is_empty() {
+                        list_strings.push(text.trim().to_string());
+                    }
+                }
+                TagEnd::List(_) => {
+                    if !list_strings.is_empty() {
+                        if ordered_list {
+                            let mut list = elements::OrderedList::new();
+                            for s in std::mem::take(&mut list_strings) {
+                                list.push(elements::Paragraph::new(s));
+                            }
+                            doc.push(list);
+                        } else {
+                            let mut list = elements::UnorderedList::new();
+                            for s in std::mem::take(&mut list_strings) {
+                                list.push(elements::Paragraph::new(s));
+                            }
+                            doc.push(list);
+                        }
+                    }
+                    doc.push(elements::Break::new(1));
+                }
+                _ => {}
+            },
+            Event::Text(text) => {
+                text_buffer.push_str(&text);
+            }
+            Event::Code(text) => {
+                text_buffer.push_str(&text);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                text_buffer.push('\n');
+            }
+            _ => {}
+        }
+    }
+
+    if !text_buffer.trim().is_empty() {
+        doc.push(elements::Paragraph::new(
+            std::mem::take(&mut text_buffer).trim().to_string(),
+        ));
+    }
+
+    let pdf_path = md_path.with_extension("pdf");
+    doc.render_to_file(&pdf_path)?;
+    println!("  PDF: {}", pdf_path.display());
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let input_path = Path::new(&args.file);
+    let mut grouped: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+    let mut output_dir = PathBuf::from(".");
+
+    if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "zip") {
+        output_dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let dir = tempdir()?;
+        let file = fs::File::open(input_path)?;
+        let mut archive = ZipArchive::new(file)?;
+        archive.extract(dir.path())?;
+
+        for entry in WalkDir::new(dir.path()) {
+            let entry = entry?;
+            if entry.file_name() == "questionData.js" {
+                let file_entries = process_file(entry.path())?;
+                let group = extract_group_name(entry.path());
+                grouped.entry(group).or_default().extend(file_entries);
+            }
+        }
+    } else if input_path.is_file() && input_path.extension().map_or(false, |ext| ext == "7z") {
+        output_dir = input_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let dir = tempdir()?;
+        decompress_file(input_path, dir.path())?;
+
+        for entry in WalkDir::new(dir.path()) {
+            let entry = entry?;
+            if entry.file_name() == "questionData.js" {
+                let file_entries = process_file(entry.path())?;
+                let group = extract_group_name(entry.path());
+                grouped.entry(group).or_default().extend(file_entries);
+            }
+        }
+    } else if input_path.is_dir() {
+        output_dir = input_path.to_path_buf();
+        for entry in WalkDir::new(input_path) {
+            let entry = entry?;
+            if entry.file_name() == "questionData.js" {
+                let file_entries = process_file(entry.path())?;
+                let group = extract_group_name(entry.path());
+                grouped.entry(group).or_default().extend(file_entries);
+            }
+        }
+    } else if input_path.is_file()
+        && input_path
+            .file_name()
+            .map_or(false, |n| n == "questionData.js")
+    {
+        let file_entries = process_file(input_path)?;
+        let group = extract_group_name(input_path);
+        grouped.entry(group).or_default().extend(file_entries);
+    } else {
+        anyhow::bail!("Input path is not a directory, a .zip/.7z file, or a questionData.js file");
+    }
+
+    let output_path = Path::new(&args.output);
+    let output_stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("qa_output");
+    let output_ext = output_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("md");
+
+    let total: usize = grouped.values().map(|v| v.len()).sum();
+    let is_single_group = grouped.len() <= 1;
+
+    let groups: Vec<(String, Vec<Entry>)> = grouped.into_iter().collect();
+    for (i, (group_name, group_entries)) in groups.iter().enumerate() {
+        let out_path = if is_single_group {
+            output_dir.join(&args.output)
+        } else {
+            let safe_name = sanitize_filename(group_name);
+            // Use numbered names (set1, set2, …) when raw names are hex garbage
+            let label = if safe_name.chars().all(|c| c.is_ascii_hexdigit()) {
+                format!("set{}", i + 1)
+            } else {
+                safe_name
+            };
+            let filename = format!("{}_{}.{}", output_stem, label, output_ext);
+            output_dir.join(&filename)
+        };
+
+        process_and_write_group(
+            group_name,
+            group_entries.clone(),
+            &out_path,
+            args.include_analysis,
+            args.include_source,
+        )?;
+
+        println!("  Written {} -> {}", group_name, out_path.display());
+        if args.pdf {
+            convert_md_to_pdf(&out_path)?;
+        }
+    }
+
+    if is_single_group {
+        println!("Done. Extracted {} questions.", total);
+    } else {
+        println!(
+            "Done. Extracted {} questions across {} sets.",
+            total,
+            groups.len()
+        );
+    }
 
     Ok(())
 }

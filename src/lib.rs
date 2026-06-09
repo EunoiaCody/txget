@@ -23,4 +23,8 @@ pub struct Args {
     /// Include source file path for each question
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub include_source: bool,
+
+    /// Also generate PDF from the output markdown
+    #[arg(long, default_value_t = false)]
+    pub pdf: bool,
 }
