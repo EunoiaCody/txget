@@ -27,4 +27,8 @@ pub struct Args {
     /// Also generate PDF from the output markdown
     #[arg(long, default_value_t = false)]
     pub pdf: bool,
+
+    /// Directory containing CJK fonts for PDF generation
+    #[arg(long)]
+    pub font_dir: Option<String>,
 }
